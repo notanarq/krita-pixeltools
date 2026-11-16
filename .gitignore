@@ -1,0 +1,13 @@
+build/
+build-*/
+dist/
+*.o
+*.so
+*.moc
+moc_*.cpp
+CMakeCache.txt
+CMakeFiles/
+tmp_test
+build_oracle
+__pycache__/
+*.pyc
