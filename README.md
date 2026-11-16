@@ -36,18 +36,42 @@ afirmação (`core/tests/test_pixel_engine.cpp`, caso `ACCEPTANCE`).
 | Camada | Estado |
 |---|---|
 | **Motor de rasterização** (`core/`) — C++17 puro, sem Qt/Krita | ✅ testado: **69.128 checagens, 0 falhas** |
-| **Port Python do motor** (`pykrita/pixeltools/pixel_engine.py`) | ✅ paridade com o C++: **44.636 checagens, 0 falhas** |
+| **Port Python do motor** (`pykrita/pixeltools/pixel_engine.py`) | ✅ paridade com o C++: **44.635 checagens, 0 falhas** |
 | **Escrita de pixels undoable** (`painter.py`) | ✅ implementado (merge down = 1 passo de undo) |
 | **Docker Python** (`pixeltools_docker.py`) | ✅ importável como ZIP |
 | **Tool nativa C++** (`native/`) | ⚠️ escrita, **não compilada aqui** (precisa de árvore do Krita) |
 
-## Instalação (plugin Python, via ZIP)
+## Instalação
 
-1. `python3 scripts/package.py` gera `dist/pixeltools.zip`
-2. No Krita: **Ferramentas ▸ Scripts ▸ Importar plugin Python de arquivo…**
-3. Reinicie o Krita
-4. **Configurar Krita ▸ Gerenciador de plugins Python** → ative *Pixel Tools*
-5. Reinicie. O painel aparece em **Configurações ▸ Dockers ▸ Pixel Tools**
+Há dois caminhos. O primeiro é o mais simples.
+
+### A) Baixar o ZIP do GitHub (não precisa de Python nem de empacotar nada)
+
+**Code ▸ Download ZIP** na página do repositório. O ZIP resultante
+(`krita-pixeltools-main.zip`) já é aceito pelo importador do Krita: procure a
+pasta `pykrita` dentro dele e importe esse arquivo em
+**Ferramentas ▸ Scripts ▸ Importar plugin Python de arquivo…**
+
+O importador varre o arquivo inteiro procurando o `.desktop` e a pasta do
+módulo, então não é preciso reorganizar nada.
+
+### B) Gerar o ZIP enxuto
+
+```sh
+python3 scripts/package.py     # escreve dist/pixeltools.zip
+```
+
+Depois:
+
+1. **Ferramentas ▸ Scripts ▸ Importar plugin Python de arquivo…** → o ZIP
+2. Reinicie o Krita
+3. **Configurar Krita ▸ Gerenciador de plugins Python** → ative *Pixel Tools*
+4. Reinicie. O painel aparece em **Configurações ▸ Dockers ▸ Pixel Tools**
+
+> O `package.py` escreve uma entrada de **diretório** (`pixeltools/`) no ZIP.
+> Isso não é detalhe cosmético: o importador localiza o módulo procurando uma
+> entrada que termine em `/<nome>/`. Um ZIP montado só com arquivos faz o Krita
+> responder *"No plugins found in archive"*.
 
 > O ZIP entrega **apenas a metade Python**. A tool nativa não pode ser
 > distribuída por ZIP — veja `docs/02-build-native.md`.
