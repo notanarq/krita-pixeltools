@@ -1,0 +1,5 @@
+{
+    "Description": "Geometrically correct pixel-art shape tool (Bresenham, Zingl ellipse, hole-free Bezier)",
+    "Icon": "krita_tool_line",
+    "X-KDE-Version": "1.0"
+}
