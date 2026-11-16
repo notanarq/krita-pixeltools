@@ -47,7 +47,7 @@ import os
 import sys
 import traceback
 
-__version__ = "1.4.0"
+__version__ = "2.0.0"
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -249,7 +249,8 @@ def __getattr__(name):
         try:
             from krita import Krita
 
-            return [d for d in Krita.instance().dockers() if d.objectName() == DOCKER_ID]
+            return [d for d in Krita.instance().dockers()
+                    if d.objectName() == DOCKER_ID]
         except Exception:  # noqa: BLE001
             return []
     raise AttributeError(name)
