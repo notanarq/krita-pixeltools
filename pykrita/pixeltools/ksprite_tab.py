@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-ksprite_tab.py - the K-Sprite editor as a tab inside the Pixel Tools docker.
+ksprite_tab.py - the drawing editor as a tab inside the Pixel Tools docker.
 
 Chosen over a separate floating window on request: it reuses the docker that
 is already installed and working, so there is less surface for things to break.
@@ -17,8 +17,20 @@ Wraps KCanvas and adds the controls around it:
     status line
 
 Layer access stays here, not in the canvas: the canvas receives callables for
-reading and writing, so it never touches the Krita API. Writing happens per
-stroke and covers ONLY the dirty rectangle.
+reading and writing, so it never touches the Krita API.
+
+The undo contract
+-----------------
+A drag is ONE undo step, not one per mouse move. The canvas opens a
+StrokeSession with the layer as it was, paints into it locally while the
+mouse moves, and calls _commit_stroke ONCE on release. That single write goes
+through painter.write_rect, which merges a temporary layer - Krita's own
+undoable command.
+
+The one limit worth knowing: mergeDown() merges with the first VISIBLE node
+below, so the undoable path only exists while the target layer is the topmost
+visible one. Otherwise the stroke is written directly and the status line
+says Ctrl+Z will not undo it, rather than pretending.
 """
 
 from __future__ import annotations
@@ -46,6 +58,7 @@ from krita import Krita
 
 from .ksprite.canvas import KCanvas
 from .ksprite import tools as ks_tools
+from . import painter
 
 
 TOOL_LABELS = [
@@ -58,7 +71,7 @@ TOOL_LABELS = [
 
 
 class KSpriteTab(QWidget):
-    """The whole K-Sprite editor, ready to be dropped into a QTabWidget."""
+    """The whole drawing editor, ready to be dropped into a QTabWidget."""
 
     def __init__(self, engine, parent=None) -> None:
         super().__init__(parent)
@@ -222,6 +235,12 @@ class KSpriteTab(QWidget):
             doc_size=lambda: (doc.width(), doc.height()),
         )
 
+        # The stroke hooks: the canvas opens a session with the layer as it
+        # was, paints into it locally, and asks us to write it ONCE at the
+        # end. One write is one Krita command, so one Ctrl+Z per stroke.
+        self.canvas.begin_stroke = self._begin_stroke
+        self.canvas.commit_stroke = self._commit_stroke
+
         # Sync the two colour swatches with Krita's.
         fg = self._krita_colour(foreground=True)
         if fg is not None:
@@ -242,19 +261,57 @@ class KSpriteTab(QWidget):
         return bytes(self._node.pixelData(0, 0, doc.width(), doc.height()))
 
     def _write_node_rect(self, x: int, y: int, w: int, h: int, raw: bytes) -> bool:
-        """Writes only the dirty rectangle back to the layer."""
+        """Kept for compatibility; strokes now go through the session."""
         if self._node is None or w <= 0 or h <= 0:
             return False
+        ok, _note = painter.write_rect(self._doc, self._node, raw, x, y, w, h)
+        if ok and self._doc is not None:
+            self._doc.refreshProjection()
+        return ok
+
+    def _begin_stroke(self):
+        """Opens a stroke over the active layer.
+
+        Returns the tuple StrokeSession.begin() needs, or None to refuse the
+        stroke - refusing before the first pixel is better than drawing
+        something that cannot be committed.
+        """
+        if self._node is None or self._doc is None:
+            self.status.setText("Carregue uma layer antes de desenhar.")
+            return None
+
+        if self._node.locked():
+            self.status.setText("A layer esta bloqueada.")
+            return None
+
+        doc = self._doc
         try:
-            ok = self._node.setPixelData(raw, x, y, w, h)
+            base = self._read_node()
         except Exception as exc:  # noqa: BLE001
-            self.status.setText(f"Falha ao gravar: {exc}")
-            return False
-        if not ok:
-            return False
+            self.status.setText(f"Nao consegui ler a layer: {exc}")
+            return None
+
+        if not base:
+            self.status.setText("A layer nao devolveu pixels.")
+            return None
+
+        return (base, doc.width(), doc.height())
+
+    def _commit_stroke(self, session):
+        """Writes the finished stroke to the layer as one undo step."""
+        if self._node is None or self._doc is None:
+            session.cancel()
+            return (False, "Nenhuma layer ligada.", 0)
+
+        try:
+            ok, note, pixels = session.finish(self._doc, self._node)
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"{exc}", 0)
+
         if self._doc is not None:
             self._doc.refreshProjection()
-        return True
+
+        return (ok, note, pixels)
 
     def _krita_colour(self, foreground: bool):
         """Reads Krita's colour through the canvas, so it is sRGB."""
