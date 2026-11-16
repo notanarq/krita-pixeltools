@@ -2,6 +2,7 @@
 Type=Service
 ServiceTypes=Krita/PythonPlugin
 X-KDE-Library=pixeltools
+X-Python-2-Compatible=false
 Name=Pixel Tools
 Name[pt_BR]=Ferramentas de Pixel
 Comment=Geometrically correct pixel-art shapes: Bresenham lines, exact ellipses, hole-free Bezier curves

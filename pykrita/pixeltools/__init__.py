@@ -2,22 +2,33 @@
 """
 pixeltools - geometrically correct pixel-art tools for Krita.
 
-Entry point: Krita imports this package and calls its module-level code,
-which registers the docker.
+Entry point: Krita imports this package and runs the module-level code, which
+registers a docker FACTORY with the application.
+
+Why a factory and not an instance
+---------------------------------
+``Krita.addDockWidget`` does not exist. The Krita scripting API only offers
+``addDockWidgetFactory`` (verified against the API reference for the Krita
+class, which lists addDockWidgetFactory, addExtension, dockers(), documents()
+- and no addDockWidget at all) and every working plugin, including the
+blank template shipped by the Krita Scripting School, registers this way:
+
+    Krita.instance().addDockWidgetFactory(
+        DockWidgetFactory("someId", DockWidgetFactoryBase.DockRight, MyDocker))
+
+Krita then instantiates the docker itself, once per window, and lists it in
+Settings > Dockers. Handing it a pre-built instance silently does nothing,
+which produced the reported symptom: the plugin showed as enabled in the
+Python Plugins Manager while no docker ever appeared.
 
 Why this file is defensive
 --------------------------
-A plugin that raises during import cannot register its docker, and Krita's
-Python Plugins Manager can still show it as ticked, because the "enabled"
-flag lives in Krita's config rather than in the plugin's health. The visible
-result is exactly "says it is active, nothing appears in Settings > Dockers".
-
-That failure mode is invisible unless the plugin reports on itself, so this
-module:
+A failure during import leaves the plugin enabled in the manager (that flag
+lives in Krita's config, not in the plugin's health) with no docker, which
+is invisible and impossible to diagnose from the UI. So this module:
 
   1. logs every load attempt, successful or not, with a full traceback;
-  2. falls back to a minimal docker that DISPLAYS the error, so the plugin
-     is never silently absent;
+  2. falls back to a minimal docker that DISPLAYS the error;
   3. exposes diagnostics() for Krita's Scripter.
 
 Nothing here may raise: the worst case is a docker that did not register,
@@ -36,9 +47,13 @@ import os
 import sys
 import traceback
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Unique id Krita uses to remember this docker. Keep it stable: changing it
+# makes Krita forget the user's docked position and visibility settings.
+DOCKER_ID = "pixeltools"
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +124,7 @@ def _log(header, exc=None):
 # Registration
 # ---------------------------------------------------------------------------
 
-_instance = None
+_registered = False
 _error = None
 
 
@@ -118,8 +133,7 @@ def _make_error_docker(exc):
 
     Uses only the oldest, most stable slice of the Qt API (a label inside a
     widget) so it has the best chance of being constructible even when the
-    main docker was not. The Qt imports are repeated here on purpose: the
-    failure being reported may well be that very import.
+    real docker was not.
     """
     from krita import DockWidget
 
@@ -147,10 +161,6 @@ def _make_error_docker(exc):
                 "  import pixeltools; print(pixeltools.diagnostics())"
             )
             label.setWordWrap(True)
-            try:
-                label.setTextInteractionFlags(0x1)  # TextSelectableByMouse
-            except Exception:  # noqa: BLE001
-                pass
             layout.addWidget(label)
             layout.addStretch(1)
             self.setWidget(root)
@@ -159,21 +169,33 @@ def _make_error_docker(exc):
         def canvasChanged(self, canvas):
             return
 
-    return ErrorDocker()
+    return ErrorDocker
+
+
+def _register(docker_class, docker_id):
+    """Registers a docker class with Krita and returns True on success.
+
+    This is the ONLY supported way to add a docker: a factory, not an
+    instance. Krita builds the widget for each window and exposes it under
+    Settings > Dockers.
+    """
+    from krita import DockWidgetFactory, DockWidgetFactoryBase, Krita
+
+    factory = DockWidgetFactory(
+        docker_id,
+        DockWidgetFactoryBase.DockPosition.DockRight,
+        docker_class,
+    )
+    Krita.instance().addDockWidgetFactory(factory)
+    return True
 
 
 try:
-    from krita import Krita
-
     from .pixeltools_docker import PixelToolsDocker
 
-    _krita = Krita.instance()
-    if _krita is None:
-        raise RuntimeError("Krita.instance() returned None during plugin load")
-
-    _instance = PixelToolsDocker()
-    _krita.addDockWidget(_instance)
-    _log("docker registered OK")
+    _register(PixelToolsDocker, DOCKER_ID)
+    _registered = True
+    _log("docker factory registered OK (id=%s)" % DOCKER_ID)
 
 except Exception as _exc:  # noqa: BLE001 - never break Krita startup
     _error = _exc
@@ -181,14 +203,11 @@ except Exception as _exc:  # noqa: BLE001 - never break Krita startup
     print(f"pixeltools: failed to register docker: {_exc}", file=sys.stderr)
     traceback.print_exc()
 
-    # Last resort: register a docker that SHOWS the failure. A plugin that
-    # reports nothing is indistinguishable from a plugin that was never
-    # loaded, which is the worst possible outcome for the user.
+    # Last resort: register a docker that SHOWS the failure, so the plugin is
+    # never silently absent.
     try:
-        from krita import Krita as _K2
-
-        _instance = _make_error_docker(_exc)
-        _K2.instance().addDockWidget(_instance)
+        fallback = _make_error_docker(_exc)
+        _register(fallback, DOCKER_ID + "error")
         _log("registered fallback ERROR docker")
     except Exception as _exc2:  # noqa: BLE001
         _log("fallback error docker also failed", _exc2)
@@ -206,10 +225,10 @@ def diagnostics():
     """
     out = [
         "pixeltools " + __version__,
-        "  dir      : " + PLUGIN_DIR,
-        "  docker   : " + (type(_instance).__name__ if _instance else "NOT REGISTERED"),
-        "  error    : " + (repr(_error) if _error else "none"),
-        "  log file : " + str(_write_log("") or "unwritable"),
+        "  dir        : " + PLUGIN_DIR,
+        "  registered : " + ("yes" if _registered else "NO"),
+        "  error      : " + (repr(_error) if _error else "none"),
+        "  log file   : " + str(_write_log("") or "unwritable"),
     ]
     if _error is not None:
         out.append("  traceback:")
@@ -223,10 +242,14 @@ def diagnostics():
 
 
 def __getattr__(name):
-    # PEP 562: `pixeltools.docker` resolves to the live widget. This ONLY
-    # works while no module-level name 'docker' exists - a def docker()
-    # would shadow it, because __getattr__ runs only after normal lookup
-    # fails.
+    # `pixeltools.docker` was a live widget in 1.1.0. With a factory Krita
+    # owns the instance, so we surface the list Krita reports instead of
+    # pretending to hold one.
     if name == "docker":
-        return _instance
+        try:
+            from krita import Krita
+
+            return [d for d in Krita.instance().dockers() if d.objectName() == DOCKER_ID]
+        except Exception:  # noqa: BLE001
+            return []
     raise AttributeError(name)
