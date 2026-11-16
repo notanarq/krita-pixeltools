@@ -240,6 +240,61 @@ def stamp(doc, target_node, points: Sequence[Point],
     )
 
 
+# ---------------------------------------------------------------------------
+# Rectangle writes - what a live drawing stroke needs
+# ---------------------------------------------------------------------------
+
+
+def write_rect(doc, target_node, raw: bytes, x: int, y: int, w: int, h: int
+               ) -> Tuple[bool, str]:
+    """Writes a raw BGRA rectangle into `target_node`, one undo step.
+
+    This is the primitive a live stroke needs, and it differs from stamp() in
+    two ways that matter:
+
+      * the INPUT is bytes, not points. A stroke already holds the pixels it
+        painted in its own buffer; rebuilding them as a point list would
+        throw that away and repaint in a different order.
+
+      * it writes a RECTANGLE, including the pixels it did not change. That
+        is correct for undo: the command must restore the region as it was,
+        and a mergeDown of the whole rect does exactly that.
+
+    Returns (ok, note). A non-empty note means the write happened but with a
+    reduced guarantee (no undo), and it is fit to show the user.
+    """
+    if w <= 0 or h <= 0:
+        return (False, "Empty rectangle.")
+    need = w * h * _RGBA_U8_BPP
+    if len(raw) < need:
+        return (False, f"Short buffer: {len(raw)} bytes for {w}x{h}.")
+
+    if not _paintable_type(target_node):
+        return (False, f"Can't draw on this layer type ({target_node.type()}).")
+
+    if not _supports_direct_write(target_node):
+        return (False, "This layer is not 8-bit RGBA.")
+
+    # Path A: undoable merge. Only when the target is the topmost visible
+    # node, because mergeDown() merges with the first visible node below.
+    if _is_topmost_visible(target_node):
+        note = _stamp_via_merge(doc, target_node, raw[:need], x, y, w, h, None)
+        if note is None:
+            return (True, "")
+
+    # Path B: direct write, not undoable.
+    try:
+        ok = target_node.setPixelData(raw[:need], x, y, w, h)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"Krita refused the write: {exc}")
+
+    if not ok:
+        return (False, "Krita refused the write. The layer may be locked.")
+
+    return (True, "Drawn directly: Ctrl+Z will not undo this. "
+                  "Put the layer on top of the stack for undoable strokes.")
+
+
 def _stamp_via_merge(doc, target, raw, left, top, w, h, rgba):
     """Temp layer above target -> write -> mergeDown.
 
@@ -272,7 +327,9 @@ def _stamp_via_merge(doc, target, raw, left, top, w, h, rgba):
         # Krita consumed the node on success.
         temp = None
 
-        if not _has_ink(target, left, top, w, h, rgba):
+        # rgba None means "verify structurally only": a stroke may be
+        # transparent in places, so a colour check would false-negative.
+        if rgba is not None and not _has_ink(target, left, top, w, h, rgba):
             return "The merge produced no visible pixels."
 
         return None
