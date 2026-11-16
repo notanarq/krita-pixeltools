@@ -2,31 +2,20 @@
 """
 pixeltools_docker.py - the docker UI.
 
-What this docker can and cannot do, stated up front because it shapes every
-design decision below:
+Two tabs:
 
-  CAN: read and write pixels of a paint layer; create/remove/merge layers;
-       read the active foreground colour; compute exact integer shapes;
-       wrap the whole operation in one undoable step.
+  Formas   - type coordinates, stamp an exact shape. This is the original
+             tool: it reads the geometry as numbers because PyKrita cannot
+             receive canvas mouse events.
+  K-Sprite - the freehand editor, which handles its own mouse in a Qt widget.
+             See ksprite_tab.py.
 
-  CANNOT: receive mouse events on the canvas, nor convert screen coordinates
-       to image coordinates. PyKrita exposes neither. So "drag to draw with a
-       live preview" is impossible from Python - that part is the C++ tool in
-       native/ and is documented as such.
-       Because of that, this docker takes the shape's geometry as NUMBERS.
-
-Two ways to get geometry, both honest about the limitation:
-
-  1) "Capture from selection" reads the CURRENT selection's bounding box and
-     uses it as the shape box. Select with any Krita selection tool
-     (rectangle, ellipse, polygon), then hit the button. This is the closest
-     thing to "draw with the mouse" available without C++.
-
-  2) Type the box, or the four Bezier control points, directly.
-
-The stroke is applied as: temporary paint layer on top -> write exact pixels
--> merge down. Merging is wrapped by Krita's own "Merge Down" undo command, so
-a single Ctrl+Z removes the whole shape.
+Why the numeric tab still exists
+--------------------------------
+The two solve different problems. The numeric tab is precise and repeatable:
+you want a 12x12 circle at (40, 60), you get exactly that. The K-Sprite tab is
+for drawing by hand. Both write through the same engine, so a circle from
+either one is pixel-identical.
 """
 
 from __future__ import annotations
@@ -41,6 +30,7 @@ try:
         QLineEdit,
         QPushButton,
         QSpinBox,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
@@ -55,6 +45,7 @@ except ImportError:  # Krita 5.x
         QLineEdit,
         QPushButton,
         QSpinBox,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
@@ -64,17 +55,19 @@ from krita import DockWidget, Krita  # noqa: E402
 
 from . import painter  # noqa: E402
 from . import pixel_engine as pe  # noqa: E402
+from .ksprite_tab import KSpriteTab  # noqa: E402
 
 
 def _qt_enum(scope, group: str, name: str):
     """Returns a Qt enum value on both PyQt5 (Krita 5) and PyQt6 (Krita 6).
 
-    PyQt5 exposes flat enums: Qt.AlignRight.
-    PyQt6 scopes them:        Qt.AlignmentFlag.AlignRight.
-    Writing either form directly breaks on the other version - and because
-    the docker is constructed inside a try/except at import time, the
-    resulting AttributeError silently prevents registration, leaving the
-    plugin enabled but with no docker in the menu. Hence this helper.
+    PyQt5 exposes flat enums:  Qt.AlignRight
+    PyQt6 scopes them:         Qt.AlignmentFlag.AlignRight
+
+    Writing either form directly breaks on the other version. And because the
+    docker is constructed inside a try/except at import time, the resulting
+    AttributeError is swallowed and the plugin stays enabled but invisible:
+    ticked in the Python Plugins Manager, absent from Settings > Dockers.
     """
     flat = getattr(scope, name, None)
     if flat is not None:
@@ -96,12 +89,32 @@ SHAPES = [
 
 
 class PixelToolsDocker(DockWidget):
-    """Docker widget: pick a shape, give the geometry, stamp exact pixels."""
+    """Docker widget hosting both tabs."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Pixel Tools")
 
+        root = QWidget()
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs)
+
+        # Tab 1: the numeric shape stamper.
+        self.tabs.addTab(self._build_shapes_tab(), "Formas")
+
+        # Tab 2: the K-Sprite freehand editor.
+        self.ksprite = KSpriteTab(pe, self)
+        self.tabs.addTab(self.ksprite, "K-Sprite")
+
+        self.setWidget(root)
+
+    # -- tab 1: numeric shapes ----------------------------------------
+
+    def _build_shapes_tab(self) -> QWidget:
+        """Type coordinates, stamp an exact shape."""
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -171,7 +184,7 @@ class PixelToolsDocker(DockWidget):
         layout.addWidget(self.status)
 
         layout.addStretch(1)
-        self.setWidget(root)
+        return root
 
     # -- helpers -------------------------------------------------------------
 
@@ -231,7 +244,7 @@ class PixelToolsDocker(DockWidget):
 
     # -- shape construction --------------------------------------------------
 
-    def _build_path(self) -> list[tuple[int, int]]:
+    def _build_path(self) -> list:
         a = (self.x0.value(), self.y0.value())
         b = (self.x1.value(), self.y1.value())
         shape = self.shape_combo.currentText()
@@ -392,7 +405,7 @@ class PixelToolsDocker(DockWidget):
 # ---------------------------------------------------------------------------
 
 
-def parse_points(text: str) -> list[tuple[int, int]]:
+def parse_points(text: str) -> list:
     """Parses 'x,y x,y ...' into a list of points."""
     out = []
     for chunk in text.replace(";", " ").split():
