@@ -17,10 +17,10 @@ design decision below:
 
 Two ways to get geometry, both honest about the limitation:
 
-  1) "Capture Canvas" reads the CURRENT selection's bounding box and uses it
-     as the shape box. Select with any Krita selection tool (rectangle,
-     ellipse, polygon), then hit the button. This is the closest thing to
-     "draw with the mouse" available without C++.
+  1) "Capture from selection" reads the CURRENT selection's bounding box and
+     uses it as the shape box. Select with any Krita selection tool
+     (rectangle, ellipse, polygon), then hit the button. This is the closest
+     thing to "draw with the mouse" available without C++.
 
   2) Type the box, or the four Bezier control points, directly.
 
@@ -66,6 +66,26 @@ from . import painter  # noqa: E402
 from . import pixel_engine as pe  # noqa: E402
 
 
+def _qt_enum(scope, group: str, name: str):
+    """Returns a Qt enum value on both PyQt5 (Krita 5) and PyQt6 (Krita 6).
+
+    PyQt5 exposes flat enums:  Qt.AlignRight
+    PyQt6 scopes them:         Qt.AlignmentFlag.AlignRight
+
+    Writing either form directly breaks on the other version. And because the
+    docker is constructed inside a try/except at import time, the resulting
+    AttributeError is swallowed and the plugin stays enabled but invisible:
+    ticked in the Python Plugins Manager, absent from Settings > Dockers.
+    """
+    flat = getattr(scope, name, None)
+    if flat is not None:
+        return flat
+    group_obj = getattr(scope, group, None)
+    if group_obj is not None:
+        return getattr(group_obj, name)
+    raise AttributeError(f"Qt has neither {name} nor {group}.{name}")
+
+
 SHAPES = [
     "Line",
     "Ellipse (outline)",
@@ -90,7 +110,7 @@ class PixelToolsDocker(DockWidget):
 
         # --- shape selection ------------------------------------------------
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setLabelAlignment(_qt_enum(Qt, "AlignmentFlag", "AlignRight"))
 
         self.shape_combo = QComboBox()
         self.shape_combo.addItems(SHAPES)
