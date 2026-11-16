@@ -47,7 +47,7 @@ import os
 import sys
 import traceback
 
-__version__ = "1.2.0"
+__version__ = "1.4.0"
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
