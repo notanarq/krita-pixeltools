@@ -1,28 +1,35 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-canvas.py - the K-Sprite drawing widget, embedded in the Pixel Tools docker.
+canvas.py - the drawing widget, embedded in the Pixel Tools docker.
 
 Why a widget and not Krita's canvas
 -----------------------------------
-PyKrita exposes no mouse events on the Krita canvas and no canvas-to-image
-conversion, so a plugin cannot intercept a drag over the artwork. A Qt widget
-DOES receive mouse events, so the editor draws into its own view of one layer
-and writes the result back through Node.setPixelData.
+PyKrita exposes no mouse events on the Krita canvas, so a plugin cannot
+intercept a drag over the artwork. A Qt widget DOES receive mouse events, so
+the editor renders its own view of one layer and writes the result back.
 
 This is the approach the original K-Sprite takes, and it is the only one that
 works from Python.
 
 Responsibilities, kept deliberately narrow
 ------------------------------------------
-  * keep a LayerBuffer of the active layer
+  * keep a LayerBuffer of the active layer, for rendering
   * render it, zoomed by an integer factor
   * turn mouse events into pixel coordinates and drive a Tool
   * draw the live preview of the tool on top of the buffer
-  * write only the dirty rectangle back to Krita, per stroke
+  * open and close a StrokeSession, so a drag is ONE layer write
 
-It knows nothing about Krita's API: the host passes in callables, one to read
-the layer bytes and one to write a rectangle back. That keeps this file
-testable and keeps the Krita specifics in the docker.
+It knows nothing about Krita's API and nothing about undo: the host supplies
+callables. Keeping the undo decision out of the widget is what lets the tests
+run the whole drag with a fake layer that merely counts writes.
+
+Two write modes
+---------------
+With a host (begin_stroke set), each drag is a session: the pixels accumulate
+locally and reach the layer once, on release, as a single undo step.
+
+Without a host, the widget paints its own buffer only. That mode is what the
+coordinate tests use; it must keep working so a bare canvas never raises.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ except ImportError:  # Krita 5
     from PyQt5.QtWidgets import QWidget
 
 from .buffer import BPP, LayerBuffer, BufferError
+from ..stroke import StrokeSession, StrokeError
 from . import tools as ksprite_tools
 
 Point = Tuple[int, int]
@@ -104,6 +112,13 @@ class KCanvas(QWidget):
         self.read_layer: Optional[Callable[[], bytes]] = None
         self.write_rect = None
         self.doc_size = None
+
+        # Stroke IO, supplied by the host. When a stroke begins the canvas
+        # hands these to a StrokeSession so the whole drag becomes ONE write
+        # - and therefore one undo step - instead of one per mouse move.
+        self.begin_stroke: Optional[Callable[[], object]] = None
+        self.commit_stroke = None
+        self.stroke: Optional[StrokeSession] = None
 
         # --- interaction ----------------------------------------------
         self._panning = False
@@ -323,7 +338,20 @@ class KCanvas(QWidget):
 
         if self.tool is None:
             self.set_tool(self.tool_name)
+
+        # Open the stroke BEFORE the first pixel: the session needs the layer
+        # as it was, and a stroke cannot be rewritten after the fact.
+        self.stroke = None
+        if self.begin_stroke is not None:
+            opened = self.begin_stroke()
+            if opened is None:
+                self._drawing = False
+                return
+            self.stroke = StrokeSession()
+            self.stroke.begin(*opened)
+
         self.tool.begin(px, py)
+        self._paint_preview_to_stroke()
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
@@ -350,6 +378,7 @@ class KCanvas(QWidget):
             px, py = self._constrain_square(px, py)
 
         self.tool.drag(px, py)
+        self._paint_preview_to_stroke()
         self._last_pixel = (px, py)
         self.update()
 
@@ -396,39 +425,81 @@ class KCanvas(QWidget):
         )
         self.update()
 
-    # -- committing ----------------------------------------------------
+    # -- stroke --------------------------------------------------------
+
+    def _paint_preview_to_stroke(self) -> None:
+        """Copies what the tool has drawn so far into the local stroke buffer.
+
+        The tool's points() is the LIVE preview: it can shrink as the stroke
+        develops (the pixel-perfect pass drops a corner that became
+        redundant), so a pixel already written to the buffer would stay
+        behind. To keep the committed result identical to the preview, the
+        stroke repaints from the layer copy on every update.
+        """
+        if self.stroke is None or self.tool is None:
+            return
+
+        pts = self.tool.points()
+        if not pts:
+            return
+
+        # Re-apply from the base copy so removed preview pixels disappear.
+        if self.stroke.paint_count:
+            self.stroke.reset_paint()
+
+        self.stroke.update(pts, self._stroke_colour(), erase=self.eraser)
 
     def _commit_stroke(self) -> None:
-        """Writes the finished stroke into the buffer and back to Krita."""
-        if self.tool is None or self.buffer is None:
+        """Closes the stroke: ONE write into the layer, ONE undo step."""
+        if self.tool is None:
             return
 
         pts = self.tool.commit_points()
         self.tool.reset()
 
-        if not pts:
+        session = self.stroke
+        self.stroke = None
+
+        # No session means the host did not offer one: fall back to painting
+        # straight into the buffer, which is what a bare canvas can do.
+        if session is None:
+            if pts and self.buffer is not None:
+                if self.eraser:
+                    for x, y in pts:
+                        self.buffer.erase(x, y)
+                else:
+                    self.buffer.put_generated(pts, self._stroke_colour())
+                self._rebuild_image()
+                self.strokeCommitted.emit(
+                    f"{len(pts)} px · {self.tool_name} · buffer local"
+                )
+            self._drawing = False
+            self.update()
             return
 
-        if self.eraser:
-            for x, y in pts:
-                self.buffer.erase(x, y)
-            painted = len(pts)
-        else:
-            painted = self.buffer.put_generated(pts, self._stroke_colour())
+        if not pts or self.commit_stroke is None:
+            session.cancel()
+            self._drawing = False
+            return
+
+        # Apply the final point list, then hand the session to the host.
+        session.reset_paint()
+        session.update(pts, self._stroke_colour(), erase=self.eraser)
+
+        ok, note, pixels = self.commit_stroke(session)
 
         self._rebuild_image()
 
-        rect = self.buffer.dirty.as_tuple()
-        self.buffer.dirty.reset()
-
-        if self.write_rect is not None and rect[2] > 0 and rect[3] > 0:
-            raw = self.buffer.region(*rect)
-            ok = self.write_rect(rect[0], rect[1], rect[2], rect[3], raw)
-            state = "gravado" if ok else "FALHOU ao gravar"
+        if not ok:
+            state = f"FALHOU: {note}"
+        elif note:
+            state = f"gravado SEM undo: {note}"
         else:
-            state = "sem alteracao"
+            state = "gravado (1 passo de undo)"
 
-        self.strokeCommitted.emit(f"{painted} px · {self.tool_name} · {state}")
+        self.strokeCommitted.emit(
+            f"{pixels} px · {self.tool_name} · {state}"
+        )
         self.update()
 
     # -- keyboard ------------------------------------------------------
