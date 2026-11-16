@@ -4,16 +4,16 @@ pixeltools_docker.py - the docker UI.
 
 Two tabs:
 
-  Formas   - type coordinates, stamp an exact shape. This is the original
-             tool: it reads the geometry as numbers because PyKrita cannot
-             receive canvas mouse events.
-  K-Sprite - the freehand editor, which handles its own mouse in a Qt widget.
-             See ksprite_tab.py.
+  Formas - type coordinates, stamp an exact shape. This is the original tool:
+           it reads the geometry as numbers because PyKrita cannot receive
+           canvas mouse events.
+  Tools  - the drawing editor, which handles its own mouse in a Qt widget.
+           See ksprite_tab.py.
 
 Why the numeric tab still exists
 --------------------------------
 The two solve different problems. The numeric tab is precise and repeatable:
-you want a 12x12 circle at (40, 60), you get exactly that. The K-Sprite tab is
+you want a 12x12 circle at (40, 60), you get exactly that. The Tools tab is
 for drawing by hand. Both write through the same engine, so a circle from
 either one is pixel-identical.
 """
@@ -105,9 +105,9 @@ class PixelToolsDocker(DockWidget):
         # Tab 1: the numeric shape stamper.
         self.tabs.addTab(self._build_shapes_tab(), "Formas")
 
-        # Tab 2: the K-Sprite freehand editor.
+        # Tab 2: the drawing editor.
         self.ksprite = KSpriteTab(pe, self)
-        self.tabs.addTab(self.ksprite, "K-Sprite")
+        self.tabs.addTab(self.ksprite, "Tools")
 
         self.setWidget(root)
 
@@ -227,7 +227,6 @@ class PixelToolsDocker(DockWidget):
             self._say("No selection. Use a selection tool first.")
             return
 
-        # Krita 5.2+ exposes Selection.x()/y()/width()/height().
         x, y = sel.x(), sel.y()
         w, h = sel.width(), sel.height()
         if w <= 0 or h <= 0:
