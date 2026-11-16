@@ -100,6 +100,116 @@ def line(a: Point, b: Point) -> List[Point]:
     return out
 
 
+def is_connected_chain(path: Sequence[Point]) -> bool:
+    """True when each point is 8-adjacent to the previous one.
+
+    The pixel-perfect pass compares path[c-1] and path[c+1] as if they were
+    the two neighbours of path[c] IN THE IMAGE. That is only true when the
+    sequence is a walk through adjacent pixels.
+
+    Rasterizers that emit symmetric points quadratically (the ellipse emits
+    its four quadrants at once) produce a SET, not a walk: consecutive
+    entries can be on opposite sides of the shape. Running the pass on such a
+    list deletes structural pixels - an 11x11 circle of 28 px collapses to 21
+    with visible holes.
+
+    So the pass is guarded by this check instead of being applied blindly.
+    """
+    for i in range(1, len(path)):
+        dx = abs(path[i][0] - path[i - 1][0])
+        dy = abs(path[i][1] - path[i - 1][1])
+        if dx > 1 or dy > 1:
+            return False
+    return True
+
+
+def pixel_perfect(path: Sequence[Point]) -> List[Point]:
+    """Removes the redundant corner pixel of every L-shape in a freehand path.
+
+    This is the canonical "pixel perfect" pass that every serious pixel art
+    editor applies to pencil strokes (Graphics Gale, Aseprite, Hexels). A
+    freehand path taken from the mouse is a chain of single-pixel steps, so a
+    diagonal movement leaves a stair with a doubled corner:
+
+        0 1 0        the pixel at (1,1) is adjacent to BOTH its neighbours,
+        0 1 1   ->   so the stroke reads as 2px thick at the corner.
+        0 0 1
+
+    The rule: drop path[c] when its two neighbours each share exactly one axis
+    with it (so it is an L-corner) AND those neighbours differ on BOTH axes
+    (so the corner is redundant, not a genuine turn). Everything else is kept.
+
+    WHEN TO USE IT - and when not to. This matters more than the algorithm:
+
+      * FREEHAND / LINE strokes: use it. That is what it was invented for.
+      * GEOMETRIC SHAPES: never. They are already exact. Filtering them does
+        real damage, and both failure modes were measured:
+
+          - the ellipse rasterizer emits its four quadrants at once, so
+            consecutive entries are not neighbouring pixels; an 11x11 circle
+            collapsed from 28 px to 21, with holes.
+          - a rectangle and a bezier ARE connected chains, so they pass the
+            guard below, but their corners are structural: a 7x5 rectangle
+            lost all four corners and became a chamfered octagon.
+
+    So the guard can only catch the disconnected case. Keeping shapes away
+    from this function is the caller's job: tools.py decides, and only the
+    brush and the line tool route through here.
+
+    GUARD: requires a connected chain (each pixel adjacent to the previous
+    one). A disconnected point set is returned unchanged, because "the
+    previous entry" would not be a neighbouring pixel.
+    """
+    if len(path) < 3 or not is_connected_chain(path):
+        return list(path)
+
+    out: List[Point] = []
+    c = 0
+    n = len(path)
+
+    while c < n:
+        if c > 0 and c + 1 < n:
+            prev = path[c - 1]
+            cur = path[c]
+            nxt = path[c + 1]
+
+            # The corner pixel shares one axis with each neighbour...
+            shares_axis_prev = prev[0] == cur[0] or prev[1] == cur[1]
+            shares_axis_next = nxt[0] == cur[0] or nxt[1] == cur[1]
+            # ...and the neighbours are diagonal to each other, which is what
+            # makes this pixel redundant rather than structural.
+            neighbours_diagonal = prev[0] != nxt[0] and prev[1] != nxt[1]
+
+            if shares_axis_prev and shares_axis_next and neighbours_diagonal:
+                c += 1  # skip: this is the redundant corner
+
+        out.append(path[c])
+        c += 1
+
+    return out
+
+
+def bresenham_points(a: Point, b: Point) -> List[Point]:
+    """Every pixel Bresenham touches from a to b, WITHOUT the perfect pass.
+
+    This is what a pencil tool needs: the raw staircase the pointer follows.
+    `line()` already returns exactly that, kept here as a named alias so the
+    intent is explicit where the two are used together.
+    """
+    return line(a, b)
+
+
+def stroke(a: Point, b: Point, perfect: bool = True) -> List[Point]:
+    """A LINE stroke between two points, optionally pixel-perfect.
+
+    This is the only shape-producing helper that applies the pass, and it is
+    a straight line, so the worst case is dropping a redundant stair corner.
+    Geometric shapes are deliberately absent from this file's filter path.
+    """
+    raw = line(a, b)
+    return pixel_perfect(raw) if perfect else raw
+
+
 # ---------------------------------------------------------------------------
 # Ellipse - Zingl's integer rasterizer (corrected midpoint)
 # ---------------------------------------------------------------------------
@@ -112,6 +222,11 @@ def ellipse(a: Point, b: Point) -> List[Point]:
     The textbook midpoint ellipse drops the last pixel on even diameters and
     flattens badly on very thin ellipses; this one is symmetric for every
     box size, which is exactly what pixel art needs.
+
+    NOTE: the four quadrants are emitted symmetrically, so consecutive
+    entries in the returned list are NOT neighbouring pixels. That is fine
+    for painting (order does not matter) but it is why this output must never
+    be passed to pixel_perfect().
     """
     x0, x1 = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
     y0, y1 = (a[1], b[1]) if a[1] <= b[1] else (b[1], a[1])
@@ -228,6 +343,10 @@ def bezier(
     Bresenham. The result is 8-connected by construction, so there is never a
     visible gap - the exact failure mode of drawing a curve by stamping a
     brush at floating-point positions.
+
+    NOTE: unlike the ellipse this IS a connected chain, so it passes
+    pixel_perfect's guard - but its corners are structural turn points, so the
+    pass still must not be applied to it.
     """
     if samples_per_unit <= 0.0:
         samples_per_unit = 1.0
@@ -283,7 +402,7 @@ def fill_outline(outline: Sequence[Point]) -> List[Point]:
     acc = PointAccumulator()
     acc.add_path(outline)
 
-    rows: dict[int, List[int]] = {}
+    rows: dict = {}
     for x, y in outline:
         rows.setdefault(y, []).append(x)
 
