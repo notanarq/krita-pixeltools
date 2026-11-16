@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ActionCollection version="2" name="Scripts">
+  <Actions category="Scripts">
+    <text>Pixel Tools</text>
+
+    <Action name="pixeltools_draw">
+      <icon>krita_tool_line</icon>
+      <text>Draw Pixel Shape...</text>
+      <whatsThis>Draws a geometrically exact shape on the active layer.</whatsThis>
+      <toolTip>Draw a Bresenham line, exact ellipse or hole-free Bezier</toolTip>
+      <iconText></iconText>
+      <activationFlags>0</activationFlags>
+      <activationConditions>0</activationConditions>
+      <shortcut></shortcut>
+      <isCheckable>false</isCheckable>
+      <statusTip>Draw a pixel-exact shape</statusTip>
+    </Action>
+  </Actions>
+</ActionCollection>

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=pixeltools
+Name=Pixel Tools
+Name[pt_BR]=Ferramentas de Pixel
+Comment=Geometrically correct pixel-art shapes: Bresenham lines, exact ellipses, hole-free Bezier curves
+Comment[pt_BR]=Formas de pixel art geometricamente corretas: linhas Bresenham, elipses exatas, curvas Bezier sem buracos
