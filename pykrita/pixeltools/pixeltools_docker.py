@@ -69,13 +69,12 @@ from . import pixel_engine as pe  # noqa: E402
 def _qt_enum(scope, group: str, name: str):
     """Returns a Qt enum value on both PyQt5 (Krita 5) and PyQt6 (Krita 6).
 
-    PyQt5 exposes flat enums:  Qt.AlignRight
-    PyQt6 scopes them:         Qt.AlignmentFlag.AlignRight
-
-    Writing either form directly breaks on the other version. And because the
-    docker is constructed inside a try/except at import time, the resulting
-    AttributeError is swallowed and the plugin stays enabled but invisible:
-    ticked in the Python Plugins Manager, absent from Settings > Dockers.
+    PyQt5 exposes flat enums: Qt.AlignRight.
+    PyQt6 scopes them:        Qt.AlignmentFlag.AlignRight.
+    Writing either form directly breaks on the other version - and because
+    the docker is constructed inside a try/except at import time, the
+    resulting AttributeError silently prevents registration, leaving the
+    plugin enabled but with no docker in the menu. Hence this helper.
     """
     flat = getattr(scope, name, None)
     if flat is not None:
@@ -314,25 +313,42 @@ class PixelToolsDocker(DockWidget):
             return
 
         try:
-            painted = painter.stamp(doc, node, clipped, color)
+            painted, note = painter.stamp(doc, node, clipped, color)
         except painter.PaintError as exc:
             self._say(str(exc))
             return
 
-        doc.refresh()
-        self._say(
+        # Document has no refresh(); refreshProjection() is the documented
+        # call that recomposes the projection so the canvas shows the stroke.
+        doc.refreshProjection()
+        message = (
             f"Drew {painted} px on '{node.name()}' "
-            f"(box {box[0]},{box[1]}-{box[2]},{box[3]}). Ctrl+Z to undo."
+            f"(box {box[0]},{box[1]}-{box[2]},{box[3]})."
         )
+        if note:
+            message += " " + note
+        else:
+            message += " Ctrl+Z to undo."
+        self._say(message)
 
     def _foreground_rgba(self):
-        """Reads the active foreground colour as 8-bit RGBA.
+        """Reads the active foreground colour as 8-bit sRGB RGBA.
 
-        View.foregroundColor() returns a ManagedColor in the document's
-        colour space. We ask it for its own components and normalise them,
-        which works for RGBA/GrayA and degrades gracefully elsewhere.
+        ManagedColor.components() returns the colour in the DOCUMENT's colour
+        space, whose channel order can differ (Krita's internal RGBA is often
+        BGR). Converting through colorForCanvas() gives a QColor in sRGB,
+        where red()/green()/blue()/alpha() are unambiguous 0..255 values -
+        no guessing about channel order.
         """
-        view = Krita.instance().activeWindow().activeView()
+        try:
+            from PyQt5.QtGui import QColor  # Krita 5.x
+        except ImportError:
+            from PyQt6.QtGui import QColor  # Krita 6.x
+
+        window = Krita.instance().activeWindow()
+        if window is None:
+            return None
+        view = window.activeView()
         if view is None:
             return None
 
@@ -340,21 +356,23 @@ class PixelToolsDocker(DockWidget):
         if managed is None:
             return None
 
+        # Preferred: go through the canvas so the result is sRGB.
+        try:
+            qcolor = managed.colorForCanvas(view.canvas())
+            if isinstance(qcolor, QColor):
+                return (qcolor.red(), qcolor.green(), qcolor.blue(), qcolor.alpha())
+        except Exception:  # noqa: BLE001 - fall back to raw components
+            pass
+
+        # Fallback: raw components, assuming the conventional R,G,B,A order.
         try:
             components = list(managed.components())
-            model = managed.colorModel()
-        except Exception:  # noqa: BLE001 - API shape varies across 5.x/6.x
+        except Exception:  # noqa: BLE001
             return None
 
         if not components:
             return None
 
-        # Only RGBA-like spaces map cleanly to our 8-bit BGRA writer.
-        if model not in ("RGBA", "RGB"):
-            return None
-
-        # Normalise to 0..255. Components may be 0..1 floats (typical) or
-        # already 0..255 (unlikely but cheap to guard).
         vals = [c * 255.0 if c <= 1.0 else c for c in components]
         vals = [max(0, min(255, int(round(v)))) for v in vals]
         while len(vals) < 3:
