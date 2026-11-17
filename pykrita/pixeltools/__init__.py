@@ -39,15 +39,17 @@ Log locations, first writable wins:
     ~/.local/share/krita/pixeltools.log
     /tmp/pixeltools.log
 
-Live report, in Krita's Scripter (Tools > Scripts > Scripter):
+Live reports, in Krita's Scripter (Tools > Scripts > Scripter):
+
     import pixeltools; print(pixeltools.diagnostics())
+    import pixeltools.canvas_tool as ct; print(ct.probe())
 """
 
 import os
 import sys
 import traceback
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
