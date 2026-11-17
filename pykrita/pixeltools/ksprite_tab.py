@@ -2,35 +2,32 @@
 """
 ksprite_tab.py - the drawing editor as a tab inside the Pixel Tools docker.
 
-Chosen over a separate floating window on request: it reuses the docker that
-is already installed and working, so there is less surface for things to break.
+Two ways to draw, one set of tools
+----------------------------------
+The tab is now both a switchboard and a drawing surface:
 
-What it does
-------------
-Wraps KCanvas and adds the controls around it:
+  * "Desenhar no canvas" ON - the tools act on Krita's own canvas, on the
+    active layer, with no loading step. This is the mode that behaves like
+    the Brush tool. See canvas_tool.py.
 
-    [Carregar] [Pincel][Linha][Bezier][Quadrado][Circulo]
-    [ ] Preenchido  [x] Pixel perfect  [ ] Borracha   Zoom - +
-    +-----------------------------------------------------+
-    |                    KCanvas                          |
-    +-----------------------------------------------------+
-    status line
+  * "Desenhar no canvas" OFF - the original mode: a zoomed view of one layer
+    inside the docker, for precise pixel work.
 
-Layer access stays here, not in the canvas: the canvas receives callables for
-reading and writing, so it never touches the Krita API.
+The tool buttons, the options and the colours are shared: pick a tool once
+and it means the same thing in both modes. Two implementations with two
+toolbars would drift apart.
 
-The undo contract
------------------
-A drag is ONE undo step, not one per mouse move. The canvas opens a
-StrokeSession with the layer as it was, paints into it locally while the
-mouse moves, and calls _commit_stroke ONCE on release. That single write goes
-through painter.write_rect, which merges a temporary layer - Krita's own
-undoable command.
+The undo contract (both modes)
+------------------------------
+A drag is ONE undo step, not one per mouse move. The stroke accumulates in a
+local buffer and reaches the layer once, on release, through
+painter.write_rect, which merges a temporary layer - Krita's own undoable
+command.
 
 The one limit worth knowing: mergeDown() merges with the first VISIBLE node
 below, so the undoable path only exists while the target layer is the topmost
-visible one. Otherwise the stroke is written directly and the status line
-says Ctrl+Z will not undo it, rather than pretending.
+visible one. Otherwise the stroke is written directly and the status line says
+Ctrl+Z will not undo it, rather than pretending.
 """
 
 from __future__ import annotations
@@ -59,6 +56,7 @@ from krita import Krita
 from .ksprite.canvas import KCanvas
 from .ksprite import tools as ks_tools
 from . import painter
+from .canvas_tool import CanvasToolController
 
 
 TOOL_LABELS = [
@@ -76,13 +74,35 @@ class KSpriteTab(QWidget):
     def __init__(self, engine, parent=None) -> None:
         super().__init__(parent)
         self.engine = engine
-        self._node = None          # the Layer we are editing
+        self._node = None          # the Layer we are editing (docker mode)
         self._doc = None
         self._tool_buttons = {}
+        self.canvas_ctrl = None    # on-canvas controller, created on demand
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
+
+        # --- activation row ----------------------------------------
+        # This is the "be the Brush tool" switch. When on, the plugin draws
+        # on Krita's own canvas: no loading, no docker surface.
+        act = QHBoxLayout()
+        act.setSpacing(4)
+
+        self.btn_canvas = QPushButton("Desenhar no canvas")
+        self.btn_canvas.setCheckable(True)
+        self.btn_canvas.setToolTip(
+            "Liga a ferramenta no canvas do Krita.\n"
+            "Clique no desenho e desenhe direto na layer ativa,\n"
+            "sem carregar nada. Clique de novo para desligar."
+        )
+        self.btn_canvas.toggled.connect(self._toggle_canvas)
+        act.addWidget(self.btn_canvas)
+
+        self.lbl_mode = QLabel("docker (carregar layer)")
+        act.addWidget(self.lbl_mode)
+        act.addStretch(1)
+        layout.addLayout(act)
 
         # --- top row: load + tools ---------------------------------
         top = QHBoxLayout()
@@ -90,8 +110,8 @@ class KSpriteTab(QWidget):
 
         self.btn_load = QPushButton("Carregar")
         self.btn_load.setToolTip(
-            "Le a layer ativa para o editor.\n"
-            "Clique de novo para recarregar depois de mexer no Krita."
+            "Le a layer ativa para o editor do docker.\n"
+            "Nao e necessario no modo canvas."
         )
         self.btn_load.clicked.connect(self.load_layer)
         top.addWidget(self.btn_load)
@@ -172,6 +192,12 @@ class KSpriteTab(QWidget):
         for key, btn in self._tool_buttons.items():
             btn.setChecked(key == name)
         self.canvas.set_tool(name, **self._options())
+
+        # Keep the on-canvas controller on the same tool: the user picks a
+        # tool once and it means the same thing in both modes.
+        if self.canvas_ctrl is not None:
+            self.canvas_ctrl.set_tool(name, **self._options())
+
         self._update_filled_state(name)
         self.status.setText(f"Ferramenta: {name}")
 
@@ -183,6 +209,8 @@ class KSpriteTab(QWidget):
 
     def _apply_options(self) -> None:
         self.canvas.set_tool(self.canvas.tool_name, **self._options())
+        if self.canvas_ctrl is not None:
+            self.canvas_ctrl.set_tool(self.canvas.tool_name, **self._options())
         self._update_filled_state(self.canvas.tool_name)
 
     def _update_filled_state(self, name: str) -> None:
@@ -196,7 +224,29 @@ class KSpriteTab(QWidget):
     def _nudge_zoom(self, delta: int) -> None:
         self.canvas.set_zoom(self.canvas.zoom + delta)
 
-    # -- layer io -------------------------------------------------------
+    # -- on-canvas mode -------------------------------------------------
+
+    def _toggle_canvas(self, on: bool) -> None:
+        """Turns the on-canvas tool on or off."""
+        if on:
+            if self.canvas_ctrl is None:
+                self.canvas_ctrl = CanvasToolController(
+                    self.engine, on_status=self._on_canvas_status
+                )
+            self.canvas_ctrl.set_tool(self.canvas.tool_name, **self._options())
+            if not self.canvas_ctrl.activate():
+                self.btn_canvas.setChecked(False)
+                return
+            self.lbl_mode.setText("canvas do Krita (a layer ativa)")
+        else:
+            if self.canvas_ctrl is not None:
+                self.canvas_ctrl.deactivate()
+            self.lbl_mode.setText("docker (carregar layer)")
+
+    def _on_canvas_status(self, message: str) -> None:
+        self.status.setText(message)
+
+    # -- layer io (docker mode) -----------------------------------------
 
     def load_layer(self) -> None:
         """Binds to the active paint layer and pulls its pixels in."""
